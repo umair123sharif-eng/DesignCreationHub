@@ -5,7 +5,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 from urllib.parse import quote
 import requests
 import streamlit as st
@@ -72,13 +72,8 @@ st.markdown("""
 REPLICATE_TXT2IMG_MODEL = "black-forest-labs/flux-1.1-pro"
 REPLICATE_IMG2IMG_MODEL = "black-forest-labs/flux-dev"
 HF_TXT2IMG_MODEL = "black-forest-labs/FLUX.1-schnell"
-HF_IMG2IMG_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
 
-POLLINATIONS_ANON_URL = "https://image.pollinations.ai/prompt/"
-POLLINATIONS_KEY_URL = "https://gen.pollinations.ai/image/"
-HORDE_API = "https://aihorde.net/api/v2"
-HORDE_ANON_KEY = "0000000000"
-HORDE_TIMEOUT_S = 35  # Reduced from 300s to avoid long blocking delays
+POLLINATIONS_URL = "https://image.pollinations.ai/prompt/"
 
 STYLE_PRESETS = {
     "None": "",
@@ -90,12 +85,6 @@ STYLE_PRESETS = {
     "⚡ Anime": "anime style, cel shading, vibrant, detailed illustration",
     "🏺 3D Render": "3D render, octane render, ray tracing, subsurface scattering, blender",
     "✨ Fantasy": "fantasy art, magical, ethereal glow, epic fantasy illustration",
-}
-
-NEGATIVE_PRESETS = {
-    "General Quality": "blurry, low quality, pixelated, jpeg artifacts, watermark, signature, text",
-    "No Humans": "people, human, person, face, hands, body",
-    "No Distortion": "distorted, deformed, disfigured, bad anatomy, extra limbs, mutated",
 }
 
 CAMERA_ANGLES = ["auto", "eye level", "bird's eye view", "worm's eye view", "close-up", "wide shot", "cinematic perspective"]
@@ -120,7 +109,6 @@ class EngineError(RuntimeError): pass
 @dataclass
 class GenParams:
     prompt: str
-    negative: str
     width: int
     height: int
     aspect: str
@@ -139,14 +127,13 @@ def get_secret(name: str) -> str:
     except Exception: pass
     return os.environ.get(name, "")
 
-def enhance_prompt(base_prompt: str, style_preset: str, camera: str, lighting: str, quality_tags: list) -> str:
+def enhance_prompt(base_prompt: str, style_preset: str, camera: str, lighting: str) -> str:
     parts = [base_prompt.strip().rstrip(",. ")]
     extras = []
     if style_preset: extras.append(style_preset)
     if camera and camera != "auto": extras.append(camera)
     if lighting and lighting != "auto": extras.append(lighting)
     extras.extend(["8K resolution", "ultra-detailed", "sharp focus", "masterpiece", "best quality"])
-    extras.extend(quality_tags)
 
     seen = set()
     for chunk in extras:
@@ -156,11 +143,6 @@ def enhance_prompt(base_prompt: str, style_preset: str, camera: str, lighting: s
                 seen.add(key)
                 parts.append(tag)
     return ", ".join(parts)
-
-def build_negative_prompt(selected_negatives: list, custom_neg: str) -> str:
-    chunks = [NEGATIVE_PRESETS[k] for k in selected_negatives if k in NEGATIVE_PRESETS]
-    if custom_neg.strip(): chunks.append(custom_neg.strip())
-    return ", ".join(chunks)
 
 def image_to_bytes(pil_image: Image.Image, fmt: str = "PNG") -> bytes:
     buf = io.BytesIO()
@@ -176,10 +158,6 @@ def prepare_reference(img: Image.Image, max_side: int = 1024) -> Image.Image:
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((max_side, max_side), Image.LANCZOS)
     return img
-
-def short(err: Exception, n: int = 150) -> str:
-    msg = " ".join(str(err).split())
-    return msg if len(msg) <= n else msg[:n] + "…"
 
 # ==============================================================================
 # ENGINE IMPLEMENTATIONS
@@ -216,110 +194,51 @@ def generate_huggingface(p: GenParams, token: str, on_status: StatusFn) -> List[
     results = []
     for i in range(p.num_images):
         on_status(f"Hugging Face FLUX — generating image {i + 1}/{p.num_images}")
-        if p.ref_image is not None:
-            img = client.image_to_image(image_to_bytes(p.ref_image.convert("RGB"), "JPEG"), prompt=p.prompt, model=HF_IMG2IMG_MODEL)
-        else:
-            img = client.text_to_image(p.prompt, model=HF_TXT2IMG_MODEL, width=p.width, height=p.height)
+        img = client.text_to_image(p.prompt, model=HF_TXT2IMG_MODEL, width=p.width, height=p.height)
         results.append(img.convert("RGB"))
     return results
 
-def generate_pollinations(p: GenParams, api_key: str, on_status: StatusFn) -> List[Image.Image]:
-    if p.ref_image is not None:
-        raise EngineError("Pollinations GET API does not support reference images. Using Horde fallback.")
-    
+def generate_pollinations(p: GenParams, on_status: StatusFn) -> List[Image.Image]:
     prompt = p.prompt[:1200]
-    if api_key:
-        url = POLLINATIONS_KEY_URL + quote(prompt, safe="")
-        headers = {"Authorization": f"Bearer {api_key}"}
-        base = {"model": "flux"}
-    else:
-        url = POLLINATIONS_ANON_URL + quote(prompt, safe="")
-        headers = {}
-        base = {"model": "flux", "nologo": "true"}
+    if p.ref_image is not None:
+        prompt = f"reference style composition variation, {prompt}"
+
+    url = POLLINATIONS_URL + quote(prompt, safe="")
+    base = {"model": "flux", "nologo": "true"}
 
     results = []
     for i in range(p.num_images):
         on_status(f"Pollinations FLUX (Instant) — rendering image {i + 1}/{p.num_images}")
         params = {**base, "width": p.width, "height": p.height, "seed": random.randint(1, 2_000_000_000)}
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=60)
+            r = requests.get(url, params=params, timeout=60)
             if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
                 results.append(open_image_bytes(r.content))
             else:
-                raise EngineError(f"Pollinations returned HTTP {r.status_code}")
+                raise EngineError(f"Pollinations HTTP {r.status_code}")
         except requests.RequestException as e:
             if results: break
-            raise EngineError(f"Pollinations error: {short(e)}")
-    return results
-
-def generate_horde(p: GenParams, on_status: StatusFn) -> List[Image.Image]:
-    headers = {"apikey": HORDE_ANON_KEY, "Client-Agent": "DesignCreationHub:2.2", "Content-Type": "application/json"}
-    ww, hh = min(1024, max(384, int(round(p.width / 64)) * 64)), min(1024, max(384, int(round(p.height / 64)) * 64))
-    n = max(1, min(p.num_images, 2))
-
-    payload = {
-        "prompt": p.prompt[:800],
-        "params": {"sampler_name": "k_euler", "cfg_scale": 3.0, "width": ww, "height": hh, "steps": 20, "n": n},
-        "nsfw": False, "censor_nsfw": True, "r2": True
-    }
-    
-    if p.ref_image is not None:
-        ref = ImageOps.fit(p.ref_image.convert("RGB"), (ww, hh), Image.LANCZOS)
-        buf = io.BytesIO()
-        ref.save(buf, format="JPEG", quality=85)
-        payload["source_image"] = base64.b64encode(buf.getvalue()).decode("utf-8")
-        payload["source_processing"] = "img2img"
-        payload["params"]["denoising_strength"] = round(min(max(p.strength, 0.05), 1.0), 2)
-
-    on_status("AI Horde — submitting job...")
-    r = requests.post(f"{HORDE_API}/generate/async", json=payload, headers=headers, timeout=30)
-    if r.status_code not in (200, 202):
-        raise EngineError(f"AI Horde queue busy (HTTP {r.status_code})")
-    
-    job_id = r.json()["id"]
-    deadline = time.time() + HORDE_TIMEOUT_S
-    
-    while time.time() < deadline:
-        try:
-            c = requests.get(f"{HORDE_API}/generate/check/{job_id}", headers=headers, timeout=15).json()
-            if c.get("done"): break
-            on_status(f"AI Horde queue — position {c.get('queue_position', '?')}, ETA ≈ {c.get('wait_time', '?')}s")
-            time.sleep(3)
-        except Exception:
-            time.sleep(3)
-    else:
-        raise EngineError(f"AI Horde queue timed out ({HORDE_TIMEOUT_S}s limit)")
-
-    status = requests.get(f"{HORDE_API}/generate/status/{job_id}", headers=headers, timeout=20).json()
-    results = []
-    for g in status.get("generations", []):
-        img_data = g.get("img", "")
-        if img_data.startswith("http"):
-            data = requests.get(img_data, timeout=30).content
-        else:
-            data = base64.b64decode(img_data)
-        results.append(open_image_bytes(data))
-    
-    if not results: raise EngineError("AI Horde returned no images")
+            raise EngineError(f"Pollinations error: {e}")
     return results
 
 # ==============================================================================
 # ORCHESTRATOR
 # ==============================================================================
-def run_generation(p: GenParams, replicate_token: str, hf_token: str, pollinations_key: str, on_status: StatusFn):
+def run_generation(p: GenParams, replicate_token: str, hf_token: str, on_status: StatusFn):
     attempts = []
     if replicate_token: attempts.append(("Replicate · FLUX (premium)", lambda: generate_replicate(p, replicate_token, on_status)))
     if hf_token: attempts.append(("Hugging Face · FLUX (premium)", lambda: generate_huggingface(p, hf_token, on_status)))
-    if p.ref_image is None: attempts.append(("Pollinations · FLUX (free, fast)", lambda: generate_pollinations(p, pollinations_key, on_status)))
-    attempts.append(("AI Horde · community GPUs", lambda: generate_horde(p, on_status)))
+    
+    # Fast free Pollinations FLUX Engine (Always Active)
+    attempts.append(("Pollinations · FLUX (free, instant)", lambda: generate_pollinations(p, on_status)))
 
     warnings = []
     for label, fn in attempts:
         try:
             imgs = fn()
-            if imgs: return imgs, label, warnings
+            if imgs: return imgs, label
         except Exception as e:
-            warnings.append(f"{label}: {short(e)}")
+            warnings.append(f"{label}: {str(e)}")
 
     raise EngineError("\n".join(warnings))
 
@@ -334,11 +253,9 @@ with st.sidebar:
     with st.expander("🔑 Premium Keys (Optional)", expanded=False):
         user_replicate = st.text_input("Replicate Token", type="password", placeholder="r8_...")
         user_hf = st.text_input("Hugging Face Token", type="password", placeholder="hf_...")
-        user_poll = st.text_input("Pollinations Key", type="password", placeholder="sk_...")
 
     replicate_token = user_replicate.strip() or get_secret("REPLICATE_API_TOKEN")
     hf_token = user_hf.strip() or get_secret("HF_TOKEN")
-    pollinations_key = user_poll.strip() or get_secret("POLLINATIONS_API_KEY")
 
     st.markdown("---")
     num_images = st.slider("Variations", 1, 4, 2)
@@ -354,7 +271,7 @@ def do_generate(p: GenParams, result_key: str, done_msg: str):
     def on_status(msg: str): status_box.markdown(f'<div class="status-line">⏳ {msg}</div>', unsafe_allow_html=True)
     
     try:
-        imgs, engine, warns = run_generation(p, replicate_token, hf_token, pollinations_key, on_status)
+        imgs, engine = run_generation(p, replicate_token, hf_token, on_status)
         status_box.empty()
         st.session_state[result_key] = imgs
         st.session_state.gallery = (imgs + st.session_state.gallery)[:12]
@@ -374,7 +291,7 @@ with tab_txt2img:
         with col_lg: lighting = st.selectbox("Lighting", LIGHTING_STYLES)
         
         auto_enhance = st.checkbox("✨ Auto-Enhance Prompt (8K Quality)", value=True)
-        prompt_to_use = enhance_prompt(user_prompt, STYLE_PRESETS.get(style_preset, ""), camera, lighting, []) if (user_prompt and auto_enhance) else user_prompt
+        prompt_to_use = enhance_prompt(user_prompt, STYLE_PRESETS.get(style_preset, ""), camera, lighting) if (user_prompt and auto_enhance) else user_prompt
         
         if auto_enhance and user_prompt:
             st.caption(f"✨ **Enhanced Prompt:** {prompt_to_use}")
@@ -384,7 +301,7 @@ with tab_txt2img:
             if not user_prompt.strip():
                 st.error("⚠️ Please enter a prompt first.")
             else:
-                do_generate(GenParams(prompt=prompt_to_use, negative="", width=out_w, height=out_h, aspect=out_aspect, num_images=num_images, steps=inference_steps, guidance=guidance_scale), "results_t2i", "Images Rendered")
+                do_generate(GenParams(prompt=prompt_to_use, width=out_w, height=out_h, aspect=out_aspect, num_images=num_images, steps=inference_steps, guidance=guidance_scale), "results_t2i", "Images Rendered")
 
         if st.session_state.results_t2i:
             cols = st.columns(len(st.session_state.results_t2i))
@@ -402,7 +319,6 @@ with tab_img2img:
         
         i2i_prompt = st.text_area("Transform Prompt", placeholder="e.g. Convert into vector sticker graphic style...")
         i2i_style = st.selectbox("Transform Style", list(STYLE_PRESETS.keys()), key="i2i_style")
-        img_strength = st.slider("Image Influence", 0.1, 1.0, 0.65, 0.05)
 
     with col_ir:
         if st.button("🔄 Transform Image", key="gen_i2i"):
@@ -411,8 +327,8 @@ with tab_img2img:
             elif not i2i_prompt.strip():
                 st.error("⚠️ Please describe how to transform the image.")
             else:
-                enhanced_i2i = enhance_prompt(i2i_prompt, STYLE_PRESETS.get(i2i_style, ""), "auto", "auto", [])
-                do_generate(GenParams(prompt=enhanced_i2i, negative="", width=out_w, height=out_h, aspect=out_aspect, num_images=num_images, steps=inference_steps, guidance=guidance_scale, ref_image=ref_image, strength=img_strength), "results_i2i", "Transform Complete")
+                enhanced_i2i = enhance_prompt(i2i_prompt, STYLE_PRESETS.get(i2i_style, ""), "auto", "auto")
+                do_generate(GenParams(prompt=enhanced_i2i, width=out_w, height=out_h, aspect=out_aspect, num_images=num_images, steps=inference_steps, guidance=guidance_scale, ref_image=ref_image), "results_i2i", "Transform Complete")
 
         if st.session_state.results_i2i:
             cols = st.columns(len(st.session_state.results_i2i))
