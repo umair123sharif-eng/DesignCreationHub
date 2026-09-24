@@ -1,9 +1,10 @@
 import streamlit as st
 from PIL import Image
-import time
+import urllib.parse
+import random
 
 # ==========================================
-# 1. PAGE CONFIGURATION & CUSTOM STYLING
+# 1. PAGE CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(
     page_title="DesignCreationHub - VisionForge Studio",
@@ -12,7 +13,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for UI styling
 st.markdown("""
     <style>
     .main-header {
@@ -37,41 +37,31 @@ st.markdown("""
         border-radius: 10px;
         padding: 0.6rem 1rem;
         width: 100%;
-        transition: all 0.3s ease;
-    }
-    .stButton>button:hover {
-        background: linear-gradient(90deg, #5b4bc4 0%, #8c7ae6 100%);
-        transform: translateY(-2px);
     }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SIDEBAR - DEVELOPER PROFILE & SETTINGS
+# 2. SIDEBAR - DEVELOPER PROFILE
 # ==========================================
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=90)
     st.title("Developer Profile")
     st.markdown("**AI & ML Engineer**")
     st.caption("✨ *Dream it. Generate it.*")
-    
     st.markdown("---")
-    st.subheader("⚙️ Generation Engine")
-    model_preset = st.selectbox("Select Model Preset", ["SD 1.5 Quality", "SD Turbo Fast", "Flux.1 Dev"])
-    inference_steps = st.slider("Inference Steps", 10, 50, 30)
-    guidance_scale = st.slider("Guidance Scale (CFG)", 1.0, 20.0, 7.5)
-    
+    model_choice = st.selectbox("Model Engine", ["Flux / Stable Diffusion", "Turbo Fast", "Cyberpunk / Vector Special"])
     st.markdown("---")
-    st.caption("Build with Python, Streamlit & Generative AI")
+    st.caption("Powered by Real AI Diffusion Pipeline")
 
 # ==========================================
 # 3. MAIN APP HEADER
 # ==========================================
 st.markdown("<h1 class='main-header'>DesignCreationHub AI Studio</h1>", unsafe_allow_html=True)
-st.markdown("<p class='sub-header'>Turn your imagination into stunning visuals with Reference-Guided Diffusion</p>", unsafe_allow_html=True)
+st.markdown("<p class='sub-header'>Turn your imagination into stunning visuals with Real AI Diffusion</p>", unsafe_allow_html=True)
 
 # ==========================================
-# 4. INPUT SECTION (PROMPT & REFERENCE IMAGE)
+# 4. INPUT SECTION
 # ==========================================
 col_prompt, col_ref = st.columns([1.2, 0.8], gap="large")
 
@@ -80,69 +70,55 @@ with col_prompt:
     user_prompt = st.text_area(
         "Enter Image Prompt", 
         height=140,
-        placeholder="e.g., A futuristic cyberpunk street at night with glowing neon blue lights, ultra-detailed 8k, cinematic lighting..."
+        placeholder="e.g., Vibrant T-shirt graphic design sticker, Santa Claus wearing sunglasses in pumpkin coat..."
     )
     
     style_preset = st.selectbox(
         "Choose Image Style", 
-        ["3D Render", "Photorealistic", "Anime / Concept Art", "Minimalist Vector", "Cyberpunk / Sci-Fi", "Studio Portrait"]
+        ["Vector Graphic / Sticker", "3D Render", "Photorealistic", "Anime / Concept Art", "Cyberpunk / Sci-Fi"]
     )
     
-    negative_prompt = st.text_input("Negative Prompt (Optional)", placeholder="blurry, low quality, distorted, extra limbs...")
+    negative_prompt = st.text_input("Negative Prompt", value="blurry, low quality, distorted, extra limbs, bad anatomy")
 
 with col_ref:
     st.subheader("2. Reference Image (Optional)")
-    st.caption("Upload a single design or multi-design collage to guide color, layout & variations.")
+    ref_image_file = st.file_uploader("Upload Reference Image", type=["png", "jpg", "jpeg", "webp"])
     
-    ref_image_file = st.file_uploader(
-        "Upload Reference Image", 
-        type=["png", "jpg", "jpeg", "webp"],
-        help="Optional: Upload an image to extract design elements or generate variations."
-    )
-    
-    ref_strength = 0.65
     if ref_image_file is not None:
         ref_image = Image.open(ref_image_file)
-        st.image(ref_image, caption="Uploaded Reference (Single/Multi-Design)", use_container_width=True)
-        
-        ref_strength = st.slider(
-            "Reference Influence (Strength)", 
-            min_value=0.1, 
-            max_value=1.0, 
-            value=0.65, 
-            step=0.05,
-            help="Higher values keep output closer to reference image. Lower values give more freedom to text prompt."
-        )
+        st.image(ref_image, caption="Uploaded Reference Anchor", use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ==========================================
-# 5. GENERATION & VARIATION ENGINE
+# 5. REAL AI GENERATION LOGIC
 # ==========================================
-if st.button("🚀 Generate Image / Variations"):
-    if not user_prompt and ref_image_file is None:
-        st.warning("⚠️ Please enter a prompt OR upload a reference image first.")
+if st.button("🚀 Generate AI Image"):
+    if not user_prompt:
+        st.warning("⚠️ Please enter a prompt first.")
     else:
-        with st.spinner("🧠 Analyzing inputs, extracting reference features & generating outputs..."):
-            time.sleep(2) # Simulating AI pipeline
+        with st.spinner("🎨 AI is creating your image... Please wait a few seconds..."):
             
-            st.success("✅ Output Generated Successfully!")
+            # Construct enhanced prompt with style
+            full_prompt = f"{user_prompt}, style: {style_preset}, high resolution, masterpiece, detailed"
+            encoded_prompt = urllib.parse.quote(full_prompt)
             
-            # Feature mode details
-            if ref_image_file is not None:
-                st.info(f"🔄 **Mode**: Reference Analysis & Variation (Influence: {int(ref_strength*100)}%) | **Style**: {style_preset}")
-            else:
-                st.info(f"🎨 **Mode**: Pure Text-to-Image | **Style**: {style_preset}")
+            # Generate random seeds for variations
+            seed1 = random.randint(1, 99999)
+            seed2 = random.randint(1, 99999)
             
-            # Display Output Variations
+            # Real AI API Image Endpoints
+            img_url_1 = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=768&height=768&seed={seed1}&nologo=true&model=flux"
+            img_url_2 = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=768&height=768&seed={seed2}&nologo=true&model=flux"
+
+            st.success("✅ AI Image Generated Successfully!")
+            
             res_col1, res_col2 = st.columns(2)
             
             with res_col1:
-                st.markdown("#### Candidate 1 (Best Match)")
-                st.image("https://picsum.photos/600/600?random=10", use_container_width=True)
-                st.caption("Score: 9.5/10 | High Feature Alignment")
+                st.markdown("#### Candidate 1 (AI Output)")
+                st.image(img_url_1, caption=f"Generated Result (Seed: {seed1})", use_container_width=True)
                 
             with res_col2:
-                st.markdown("#### Candidate 2 (Creative Variation)")
-                st.image("https://picsum.photos/600/600?random=20", use_container_width=True)
-                st.caption("Score: 9.1/10 | Prompt Mutated Variation")
+                st.markdown("#### Candidate 2 (Variation)")
+                st.image(img_url_2, caption=f"Generated Result (Seed: {seed2})", use_container_width=True)
