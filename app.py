@@ -43,13 +43,6 @@ st.markdown("""
         background: linear-gradient(90deg, #5b4bc4 0%, #8c7ae6 100%);
         transform: translateY(-2px);
     }
-    .feature-card {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 5px solid #6C5CE7;
-        margin-bottom: 15px;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -110,7 +103,7 @@ with col_ref:
     ref_strength = 0.65
     if ref_image_file is not None:
         ref_image = Image.open(ref_image_file)
-        st.image(ref_image, caption="Uploaded Reference (Single/Multi-Design)", use_column_width=True)
+        st.image(ref_image, caption="Uploaded Reference (Single/Multi-Design)", use_container_width=True)
         
         ref_strength = st.slider(
             "Reference Influence (Strength)", 
@@ -146,10 +139,10 @@ if st.button("🚀 Generate Image / Variations"):
             
             with res_col1:
                 st.markdown("#### Candidate 1 (Best Match)")
-                st.image("https://picsum.photos/600/600?random=10", use_column_width=True)
+                st.image("https://picsum.photos/600/600?random=10", use_container_width=True)
                 st.caption("Score: 9.5/10 | High Feature Alignment")
                 
             with res_col2:
                 st.markdown("#### Candidate 2 (Creative Variation)")
-                st.image("https://picsum.photos/600/600?random=20", use_column_width=True)
+                st.image("https://picsum.photos/600/600?random=20", use_container_width=True)
                 st.caption("Score: 9.1/10 | Prompt Mutated Variation")
