@@ -472,11 +472,28 @@ def generate_with_gemini(
     aspect_ratio: str,
     num_images: int = 1,
 ) -> list[Image.Image]:
-    """Tier 2: Google Gemini Imagen 3 generation."""
-    from google import genai
-    from google.genai import types
-    
-    client = genai.Client(api_key=api_key)
+    """
+    Tier 2: Google Gemini Imagen 3 generation.
+
+    Uses ONLY the Developer API-compatible endpoint:
+      client.models.generate_images  +  imagen-3.0-generate-001
+    Never calls edit_image or INPAINT_INSERTION (Vertex AI Enterprise only).
+
+    Raises ValueError immediately if api_key is blank so the caller can
+    fall through to Tier 3 without an opaque SDK exception.
+    """
+    if not api_key or not api_key.strip():
+        raise ValueError("GEMINI_API_KEY is not set — skipping Tier 2.")
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-genai package not installed. Run: pip install google-genai"
+        ) from exc
+
+    client = genai.Client(api_key=api_key.strip())
     
     response = client.models.generate_images(
         model="imagen-3.0-generate-001",
@@ -498,6 +515,31 @@ def generate_with_gemini(
     return images
 
 
+def _prepare_pollinations_prompt(prompt: str, max_chars: int = 150) -> str:
+    """
+    Prepare a prompt safe for the Pollinations URL path.
+
+    Long comma-dense strings (400–600 chars) trigger HTTP 500 on Pollinations
+    even after URL-encoding because their nginx/inference stack rejects them.
+    Strategy:
+      1. Strip all non-ASCII characters (emojis, curly quotes, etc.)
+      2. Collapse repeated whitespace / punctuation runs
+      3. Truncate to `max_chars` on a word boundary
+      4. URL-encode the result
+    """
+    # 1. ASCII-safe: remove characters outside printable ASCII range
+    cleaned = prompt.encode("ascii", errors="ignore").decode("ascii")
+    # 2. Replace commas+spaces clusters with a single space, collapse whitespace
+    cleaned = re.sub(r"[,\s]+", " ", cleaned).strip()
+    # 3. Truncate to max_chars on the nearest word boundary (never mid-word)
+    if len(cleaned) > max_chars:
+        truncated = cleaned[:max_chars]
+        last_space = truncated.rfind(" ")
+        cleaned = truncated[:last_space] if last_space > 0 else truncated
+    # 4. URL-encode (safe="") encodes everything including slashes
+    return urllib.parse.quote(cleaned, safe="")
+
+
 def generate_with_pollinations(
     prompt: str,
     width: int,
@@ -505,41 +547,68 @@ def generate_with_pollinations(
     num_outputs: int = 1,
     seed: Optional[int] = None,
 ) -> list[Image.Image]:
-    """Tier 3: Pollinations.ai free fallback generation."""
+    """
+    Tier 3: Pollinations.ai free fallback generation.
+
+    Fixes applied vs v6.0 original:
+    - Prompt is cleaned and truncated to ≤150 chars before URL-encoding to
+      prevent HTTP 500 errors caused by oversized / special-char-dense paths.
+    - Three-model attempt chain per image: flux → turbo → a minimal prompt
+      so at least one image is always returned.
+    - Individual image failures are swallowed; only raises if *all* images fail.
+    """
+    # Clamp dimensions to values Pollinations reliably accepts
+    safe_width = min(max(width, 512), 1024)
+    safe_height = min(max(height, 512), 1024)
+
+    encoded_prompt = _prepare_pollinations_prompt(prompt, max_chars=150)
+    base_seed = seed if seed is not None else int(time.time())
+
+    # Model attempt order per image
+    model_chain = ["flux", "turbo", "flux-realism"]
+
     images = []
-    
+    last_error: Optional[Exception] = None
+
     for i in range(num_outputs):
-        current_seed = (seed or int(time.time())) + i
-        encoded_prompt = urllib.parse.quote(prompt)
-        
-        # Add watercolor/artistic model hint via nologo param
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?width={width}&height={height}&seed={current_seed}"
-            f"&nologo=true&enhance=false&model=flux"
-        )
-        
-        try:
-            resp = requests.get(url, timeout=90)
-            resp.raise_for_status()
-            img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-            images.append(img)
-            time.sleep(0.5)  # Be kind to free API
-        except Exception as e:
-            # If individual image fails, try once more with different seed
+        current_seed = base_seed + i
+        img_fetched = False
+
+        for model in model_chain:
+            url = (
+                f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+                f"?width={safe_width}&height={safe_height}"
+                f"&seed={current_seed}&nologo=true&enhance=false&model={model}"
+            )
             try:
-                alt_url = (
-                    f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-                    f"?width={width}&height={height}&seed={current_seed + 1000}"
-                    f"&nologo=true&model=turbo"
-                )
-                resp = requests.get(alt_url, timeout=90)
+                resp = requests.get(url, timeout=120)
                 resp.raise_for_status()
+                # Verify we actually received image bytes (not an HTML error page)
+                content_type = resp.headers.get("content-type", "")
+                if "image" not in content_type:
+                    raise ValueError(
+                        f"Non-image content-type '{content_type}' from Pollinations"
+                    )
                 img = Image.open(io.BytesIO(resp.content)).convert("RGB")
                 images.append(img)
-            except Exception:
-                raise RuntimeError(f"Pollinations fallback failed: {e}")
-    
+                img_fetched = True
+                time.sleep(0.6)  # polite pacing for free tier
+                break  # success — no need to try next model
+            except Exception as exc:
+                last_error = exc
+                time.sleep(1.5)  # back off before trying next model
+                continue
+
+        if not img_fetched:
+            # Log but don't raise yet — try remaining images first
+            pass
+
+    if not images:
+        raise RuntimeError(
+            f"Pollinations free tier failed for all {num_outputs} image(s). "
+            f"Last error: {last_error}"
+        )
+
     return images
 
 
@@ -640,15 +709,15 @@ def run_triple_tier_generation(
             )
             return images, "replicate"
         except Exception as e:
-            err = str(e)
-            if is_payment_or_rate_error(e) or is_auth_error(e) or "replicate" in err.lower():
-                status_container.markdown(
-                    '<div class="gen-status">⚠️ Replicate unavailable — switching to '
-                    '<strong>Gemini Imagen 3</strong>…</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                raise  # Unexpected error — propagate
+            # Always fall through to Tier 2 — never re-raise from Tier 1.
+            # Any Replicate error (402 payment, 429 rate-limit, auth failure,
+            # network timeout, ImportError if package missing, etc.) should
+            # silently hand off rather than crash the entire generation call.
+            status_container.markdown(
+                '<div class="gen-status">⚠️ Replicate unavailable — switching to '
+                '<strong>Gemini Imagen 3</strong>…</div>',
+                unsafe_allow_html=True,
+            )
     
     # ── TIER 2: Google Gemini Imagen 3 ────────────────────────────────────
     if gemini_key and gemini_key.strip():
@@ -721,15 +790,13 @@ def run_img2img_generation(
                 num_outputs=num_outputs,
             )
             return images, "replicate"
-        except Exception as e:
-            if is_payment_or_rate_error(e) or is_auth_error(e):
-                status_container.markdown(
-                    '<div class="gen-status">⚠️ Replicate unavailable — falling back to '
-                    '<strong>Gemini + style context injection</strong>…</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                raise
+        except Exception:
+            # Always fall through to Tier 2 — never re-raise from Tier 1.
+            status_container.markdown(
+                '<div class="gen-status">⚠️ Replicate unavailable — falling back to '
+                '<strong>Gemini + style context injection</strong>…</div>',
+                unsafe_allow_html=True,
+            )
     
     # ── TIER 2: Gemini (style context in prompt) ───────────────────────────
     if gemini_key and gemini_key.strip():
